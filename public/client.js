@@ -14,6 +14,8 @@ let players = {};
 let food = [];
 let bullets = [];
 let zones = [];
+let npcs = [];
+let explosionEffects = [];
 let camera = { x: 0, y: 0 };
 
 // Resize canvas
@@ -40,7 +42,11 @@ socket.on('update', (data) => {
     // Update target positions for interpolation instead of snapping
     Object.keys(data.players).forEach(id => {
         if (!players[id]) {
-            players[id] = data.players[id]; // Initial load for new player
+            // New player seen for first time — initialise with server data
+            // and pre-seed targetX/targetY so lerp doesn't skip them
+            players[id] = { ...data.players[id] };
+            players[id].targetX = data.players[id].x;
+            players[id].targetY = data.players[id].y;
         } else {
             // Update target properties for lerping
             players[id].targetX = data.players[id].x;
@@ -48,7 +54,7 @@ socket.on('update', (data) => {
             // Shield and bullet aim vector
             players[id].aimX = data.players[id].aimX;
             players[id].aimY = data.players[id].aimY;
-            players[id].radius = data.players[id].radius; // Snap radius, or lerp it too
+            players[id].radius = data.players[id].radius;
             players[id].score = data.players[id].score;
             players[id].name = data.players[id].name;
             players[id].team = data.players[id].team;
@@ -66,6 +72,24 @@ socket.on('update', (data) => {
     food = data.food;
     bullets = data.bullets || [];
     zones = data.zones || [];
+    npcs = data.npcs || [];
+    // Merge server explosions into local effects
+    if (data.explosions) {
+        data.explosions.forEach(e => {
+            // Only add if we haven't already started tracking it
+            const existing = explosionEffects.find(ef => ef.x === e.x && ef.y === e.y);
+            if (!existing) {
+                explosionEffects.push({
+                    x: e.x, y: e.y,
+                    maxRadius: e.radius,
+                    currentRadius: 0,
+                    tier: e.tier,
+                    alpha: 1,
+                    lifetime: 40 // frames
+                });
+            }
+        });
+    }
 
     if (myId && players[myId]) {
         const me = players[myId];
@@ -82,20 +106,19 @@ socket.on('died', (data) => {
 
 // Input handling
 window.addEventListener('mousemove', (e) => {
-    if (!myId || !players[myId]) return;
+    if (!myId) return; // only need myId, not necessarily players[myId] yet
 
     // Vector from center of screen (player position logically) to mouse
-    // This gives us the exact angle the player is aiming
     const dx = e.clientX - canvas.width / 2;
     const dy = e.clientY - canvas.height / 2;
     const angle = Math.atan2(dy, dx);
 
     // Send normalized direction for both movement and aiming
     socket.emit('move', {
-        x: Math.cos(angle), // Movement vector X
-        y: Math.sin(angle), // Movement vector Y
-        aimX: Math.cos(angle), // Aim vector X
-        aimY: Math.sin(angle)  // Aim vector Y
+        x: Math.cos(angle),
+        y: Math.sin(angle),
+        aimX: Math.cos(angle),
+        aimY: Math.sin(angle)
     });
 });
 
@@ -268,6 +291,100 @@ function draw() {
         ctx.fillText(p.name, p.x + offX, p.y + p.radius + offY + 5);
     });
 
+    // Draw NPCs
+    npcs.forEach(npc => {
+        if (isNaN(npc.x) || isNaN(npc.y)) return;
+        const nx = npc.x + offX;
+        const ny = npc.y + offY;
+
+        // Pulsing glow effect
+        const pulse = 0.5 + Math.sin(Date.now() / 200) * 0.3;
+
+        // Outer glow
+        const glowColor = npc.tier === 'Boss' ? `rgba(155, 89, 182, ${pulse * 0.4})` :
+            npc.tier === 'Strong' ? `rgba(142, 68, 173, ${pulse * 0.3})` :
+                `rgba(195, 155, 211, ${pulse * 0.25})`;
+        ctx.beginPath();
+        ctx.arc(nx, ny, npc.radius + 10, 0, Math.PI * 2);
+        ctx.fillStyle = glowColor;
+        ctx.fill();
+
+        // Body
+        ctx.fillStyle = npc.color;
+        ctx.beginPath();
+        ctx.arc(nx, ny, npc.radius, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Outline — menacing purple ring
+        ctx.strokeStyle = npc.tier === 'Boss' ? '#e74c3c' : '#9b59b6';
+        ctx.lineWidth = npc.tier === 'Boss' ? 5 : 3;
+        ctx.stroke();
+
+        // NPC Shield (Boss only)
+        if (npc.shieldActive && npc.aimX !== undefined && npc.aimY !== undefined) {
+            ctx.strokeStyle = 'rgba(231, 76, 60, 0.8)';
+            ctx.lineWidth = 6;
+            ctx.lineCap = 'round';
+            ctx.beginPath();
+            const perpX = -npc.aimY;
+            const perpY = npc.aimX;
+            const shieldCX = nx + npc.aimX * (npc.radius + 15);
+            const shieldCY = ny + npc.aimY * (npc.radius + 15);
+            ctx.moveTo(shieldCX + perpX * npc.radius, shieldCY + perpY * npc.radius);
+            ctx.lineTo(shieldCX - perpX * npc.radius, shieldCY - perpY * npc.radius);
+            ctx.stroke();
+            ctx.lineCap = 'butt';
+        }
+
+        // Tier label above NPC
+        const tierIcon = npc.tier === 'Boss' ? '💀 BOSS' : npc.tier === 'Strong' ? '⚡ STRONG' : '👾 WEAK';
+        ctx.fillStyle = npc.tier === 'Boss' ? '#e74c3c' : npc.tier === 'Strong' ? '#f39c12' : '#9b59b6';
+        ctx.font = `bold ${Math.max(14, npc.radius * 0.4)}px Outfit`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'bottom';
+        ctx.fillText(tierIcon, nx, ny - npc.radius - 20);
+
+        // Countdown timer
+        const secsLeft = Math.ceil(npc.timeLeft / 60);
+        ctx.fillStyle = secsLeft <= 5 ? '#e74c3c' : '#fff';
+        ctx.font = `bold ${Math.max(16, npc.radius * 0.35)}px Outfit`;
+        ctx.fillText(`${secsLeft}s`, nx, ny - npc.radius - 5);
+
+        // Mass inside NPC
+        ctx.fillStyle = 'rgba(255,255,255,0.7)';
+        ctx.font = `bold ${Math.max(14, npc.radius * 0.5)}px Outfit`;
+        ctx.textBaseline = 'middle';
+        ctx.fillText(Math.floor(npc.radius), nx, ny);
+    });
+
+    // Draw Explosions
+    explosionEffects = explosionEffects.filter(e => {
+        e.currentRadius += e.maxRadius / e.lifetime;
+        e.alpha -= 1 / e.lifetime;
+        if (e.alpha <= 0) return false;
+
+        const ex = e.x + offX;
+        const ey = e.y + offY;
+
+        // Expanding shockwave ring
+        const ringColor = e.tier === 'Boss' ? `rgba(231, 76, 60, ${e.alpha * 0.6})` :
+            e.tier === 'Strong' ? `rgba(243, 156, 18, ${e.alpha * 0.5})` :
+                `rgba(155, 89, 182, ${e.alpha * 0.4})`;
+        ctx.strokeStyle = ringColor;
+        ctx.lineWidth = e.tier === 'Boss' ? 8 : e.tier === 'Strong' ? 5 : 3;
+        ctx.beginPath();
+        ctx.arc(ex, ey, e.currentRadius, 0, Math.PI * 2);
+        ctx.stroke();
+
+        // Inner flash
+        ctx.fillStyle = `rgba(255, 255, 255, ${e.alpha * 0.3})`;
+        ctx.beginPath();
+        ctx.arc(ex, ey, e.currentRadius * 0.3, 0, Math.PI * 2);
+        ctx.fill();
+
+        return true;
+    });
+
     // Draw Minimap
     drawMinimap();
 
@@ -319,6 +436,16 @@ function drawMinimap() {
         ctx.arc(mmX + (dotX * scale), mmY + (dotY * scale), 6, 0, Math.PI * 2);
         ctx.stroke();
     }
+
+    // Draw NPCs on minimap (purple dots)
+    npcs.forEach(npc => {
+        const nx = Math.max(0, Math.min(mapSize, npc.x));
+        const ny = Math.max(0, Math.min(mapSize, npc.y));
+        ctx.fillStyle = npc.tier === 'Boss' ? '#e74c3c' : '#9b59b6';
+        ctx.beginPath();
+        ctx.arc(mmX + (nx * scale), mmY + (ny * scale), npc.tier === 'Boss' ? 4 : 2, 0, Math.PI * 2);
+        ctx.fill();
+    });
 }
 
 draw();

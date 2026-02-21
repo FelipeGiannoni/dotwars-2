@@ -15,6 +15,15 @@ const MIN_RADIUS = 15; // Minimum mass before death
 const FOOD_COUNT = 150;
 const TICK_RATE = 60; // 60 times per second
 
+// NPC Invasion constants
+const NPC_SPAWN_INTERVAL = 120000; // 2 minutes in ms
+const NPC_LIFESPAN = 30; // seconds
+const NPC_TIERS = [
+    { name: 'Weak', weight: 60, radius: 20, speed: 4, shootInterval: 90, blastRadius: 80, blastDamage: 5, reward: 15, shieldChance: 0 },
+    { name: 'Strong', weight: 30, radius: 40, speed: 3, shootInterval: 45, blastRadius: 150, blastDamage: 15, reward: 40, shieldChance: 0 },
+    { name: 'Boss', weight: 10, radius: 80, speed: 2, shootInterval: 20, blastRadius: 250, blastDamage: 30, reward: 100, shieldChance: 1 }
+];
+
 const SCORES_FILE = path.join(__dirname, 'scores.json');
 let highScores = {};
 
@@ -39,6 +48,8 @@ app.use(express.static(path.join(__dirname, 'public')));
 let players = {};
 let food = [];
 let bullets = [];
+let npcs = [];
+let explosions = []; // Visual-only, sent to client
 let nextTeam = 'red'; // Alternate teams
 
 // Initialize 16 Capture Zones (4x4 Grid)
@@ -108,6 +119,70 @@ function spawnPlayer(id, name, currentTeam) {
         shieldActive: false
     };
 }
+
+// ---- NPC INVASION SYSTEM ----
+function pickNPCTier() {
+    const roll = Math.random() * 100;
+    let cumulative = 0;
+    for (const tier of NPC_TIERS) {
+        cumulative += tier.weight;
+        if (roll < cumulative) return tier;
+    }
+    return NPC_TIERS[0];
+}
+
+function spawnNPC() {
+    const tier = pickNPCTier();
+    const edge = Math.floor(Math.random() * 4); // 0=top, 1=right, 2=bottom, 3=left
+    let x, y, aimX, aimY;
+
+    switch (edge) {
+        case 0: // Top
+            x = Math.random() * MAP_SIZE; y = -tier.radius;
+            aimX = 0; aimY = 1;
+            break;
+        case 1: // Right
+            x = MAP_SIZE + tier.radius; y = Math.random() * MAP_SIZE;
+            aimX = -1; aimY = 0;
+            break;
+        case 2: // Bottom
+            x = Math.random() * MAP_SIZE; y = MAP_SIZE + tier.radius;
+            aimX = 0; aimY = -1;
+            break;
+        case 3: // Left
+            x = -tier.radius; y = Math.random() * MAP_SIZE;
+            aimX = 1; aimY = 0;
+            break;
+    }
+
+    npcs.push({
+        id: 'npc_' + Math.random().toString(36).substr(2, 9),
+        tier: tier.name,
+        x: x,
+        y: y,
+        radius: tier.radius,
+        maxRadius: tier.radius,
+        speed: tier.speed,
+        aimX: aimX,
+        aimY: aimY,
+        shootInterval: tier.shootInterval, // ticks between shots
+        shootCooldown: tier.shootInterval,
+        blastRadius: tier.blastRadius,
+        blastDamage: tier.blastDamage,
+        reward: tier.reward,
+        shieldActive: tier.shieldChance > 0,
+        shieldCooldown: 0, // Boss toggles shield
+        timeLeft: NPC_LIFESPAN * TICK_RATE, // 30 seconds in ticks
+        color: tier.name === 'Boss' ? '#9b59b6' : tier.name === 'Strong' ? '#8e44ad' : '#c39bd3',
+        team: 'npc' // Neutral/hostile to all
+    });
+}
+
+// Spawn first NPC after 30 seconds, then every 2 minutes
+setTimeout(() => {
+    spawnNPC();
+    setInterval(spawnNPC, NPC_SPAWN_INTERVAL);
+}, 30000);
 
 io.on('connection', (socket) => {
     console.log('A user connected:', socket.id);
@@ -364,10 +439,173 @@ setInterval(() => {
         }
     });
 
+    // ---- NPC AI & COMBAT ----
+    npcs.forEach(npc => {
+        npc.timeLeft--;
+
+        // Find nearest player
+        let nearest = null;
+        let nearestDist = Infinity;
+        Object.values(players).forEach(p => {
+            const d = Math.hypot(p.x - npc.x, p.y - npc.y);
+            if (d < nearestDist) {
+                nearestDist = d;
+                nearest = p;
+            }
+        });
+
+        // Chase nearest player
+        if (nearest) {
+            const dx = nearest.x - npc.x;
+            const dy = nearest.y - npc.y;
+            const dist = Math.hypot(dx, dy);
+            if (dist > 0) {
+                npc.aimX = dx / dist;
+                npc.aimY = dy / dist;
+            }
+            npc.x += npc.aimX * npc.speed;
+            npc.y += npc.aimY * npc.speed;
+        } else {
+            // No players, drift toward center
+            const dx = MAP_SIZE / 2 - npc.x;
+            const dy = MAP_SIZE / 2 - npc.y;
+            const dist = Math.hypot(dx, dy);
+            if (dist > 10) {
+                npc.aimX = dx / dist;
+                npc.aimY = dy / dist;
+            }
+            npc.x += npc.aimX * npc.speed;
+            npc.y += npc.aimY * npc.speed;
+        }
+
+        // Boss shield toggle (on 3 sec, off 2 sec)
+        if (npc.tier === 'Boss') {
+            npc.shieldCooldown++;
+            if (npc.shieldActive && npc.shieldCooldown > 180) { // 3 sec on
+                npc.shieldActive = false;
+                npc.shieldCooldown = 0;
+            } else if (!npc.shieldActive && npc.shieldCooldown > 120) { // 2 sec off
+                npc.shieldActive = true;
+                npc.shieldCooldown = 0;
+            }
+        }
+
+        // NPC Shooting
+        npc.shootCooldown--;
+        if (npc.shootCooldown <= 0 && nearest) {
+            npc.shootCooldown = npc.shootInterval;
+            const spawnDist = npc.radius + 10;
+            bullets.push({
+                id: Math.random().toString(36).substr(2, 9),
+                ownerId: npc.id,
+                team: 'npc',
+                x: npc.x + npc.aimX * spawnDist,
+                y: npc.y + npc.aimY * spawnDist,
+                vx: npc.aimX * 8,
+                vy: npc.aimY * 8,
+                radius: npc.tier === 'Boss' ? 10 : 6,
+                damage: npc.tier === 'Boss' ? 10 : npc.tier === 'Strong' ? 7 : 4,
+                amplified: false
+            });
+        }
+
+        // NPC collision with player bullets
+        bullets.forEach(b => {
+            if (b.team === 'npc' || b.dead) return; // NPC bullets don't hurt NPCs
+            const d = Math.hypot(b.x - npc.x, b.y - npc.y);
+
+            // Check NPC shield first (Boss only)
+            if (npc.shieldActive && npc.aimX !== undefined) {
+                const perpX = -npc.aimY;
+                const perpY = npc.aimX;
+                const shieldCX = npc.x + npc.aimX * (npc.radius + 15);
+                const shieldCY = npc.y + npc.aimY * (npc.radius + 15);
+                const lx1 = shieldCX + perpX * npc.radius;
+                const ly1 = shieldCY + perpY * npc.radius;
+                const lx2 = shieldCX - perpX * npc.radius;
+                const ly2 = shieldCY - perpY * npc.radius;
+                if (lineCircleCollision(lx1, ly1, lx2, ly2, b.x, b.y, b.radius)) {
+                    b.dead = true;
+                    return;
+                }
+            }
+
+            if (d < npc.radius + b.radius) {
+                npc.radius -= b.damage;
+                // Reward the shooter
+                if (players[b.ownerId]) {
+                    players[b.ownerId].score += b.damage * 2;
+                    players[b.ownerId].radius += b.damage * 0.3;
+                }
+                b.dead = true;
+            }
+        });
+
+        // Check if NPC is dead (radius too small) or timer expired
+        if (npc.radius < 10 || npc.timeLeft <= 0) {
+            // EXPLOSION!
+            const bx = npc.x;
+            const by = npc.y;
+            const br = npc.blastRadius;
+            const bd = npc.blastDamage;
+
+            // Add visual explosion for clients
+            explosions.push({
+                x: bx,
+                y: by,
+                radius: br,
+                damage: bd,
+                tier: npc.tier,
+                timer: 30 // frames to show (0.5 sec)
+            });
+
+            // Damage all players in blast radius
+            Object.values(players).forEach(p => {
+                const d = Math.hypot(p.x - bx, p.y - by);
+                if (d < br) {
+                    // Damage scales: more damage if closer
+                    const dmgScale = 1 - (d / br);
+                    const actualDmg = Math.floor(bd * dmgScale);
+                    p.radius -= actualDmg;
+
+                    // Knockback
+                    const kbDist = (br - d) * 0.3;
+                    const kbX = (p.x - bx) / d;
+                    const kbY = (p.y - by) / d;
+                    p.x += kbX * kbDist;
+                    p.y += kbY * kbDist;
+                    p.x = Math.max(p.radius, Math.min(MAP_SIZE - p.radius, p.x));
+                    p.y = Math.max(p.radius, Math.min(MAP_SIZE - p.radius, p.y));
+
+                    // Check death from explosion
+                    if (p.radius < MIN_RADIUS) {
+                        saveScore(p.name, Math.floor(p.score));
+                        io.to(p.id).emit('died', { killedBy: `a ${npc.tier} NPC explosion!` });
+                        players[p.id] = spawnPlayer(p.id, p.name, p.team);
+                    }
+                }
+            });
+
+            // If killed by players (not timeout), give bonus to last hitter
+            if (npc.radius < 10) {
+                // Bonus score already given per bullet hit above
+            }
+
+            npc.dead = true;
+        }
+    });
+
+    // Remove dead NPCs
+    npcs = npcs.filter(n => !n.dead);
+
+    // Update explosion timers
+    explosions.forEach(e => e.timer--);
+    explosions = explosions.filter(e => e.timer > 0);
+
     // Clean up dead bullets
     bullets = bullets.filter(b => !b.dead);
 
-    io.emit('update', { players, food, bullets, zones, highScores });
+    io.emit('update', { players, food, bullets, zones, highScores, npcs, explosions });
 }, 1000 / TICK_RATE);
 
 server.listen(PORT, () => {
