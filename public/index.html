@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Agar.io Clone - Real-time Multiplayer</title>
+    <link rel="stylesheet" href="style.css">
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;700&display=swap" rel="stylesheet">
+</head>
+
+<body>
+    <div id="login-screen">
+        <div class="card">
+            <h1>AGAR.IO CLONE</h1>
+            <input type="text" id="nickname" placeholder="Enter Nickname" maxlength="15">
+            <button id="start-btn">Play Now</button>
+            <div id="instructions">
+                Use your <b>Mouse</b> to move.<br>
+                Eat small dots to grow.<br>
+                Eat smaller players to dominate.
+            </div>
+        </div>
+    </div>
+
+    <div id="game-ui" class="hidden">
+        <div id="leaderboard">
+            <h3>Leaderboard</h3>
+            <ul id="leaderboard-list"></ul>
+        </div>
+        <div id="score">Score: 0</div>
+    </div>
+
+    <canvas id="gameCanvas"></canvas>
+
+    <script src="/socket.io/socket.io.js"></script>
+    <script src="client.js"></script>
+</body>
+
+</html>
