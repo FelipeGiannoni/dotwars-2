@@ -50,7 +50,6 @@ let food = [];
 let bullets = [];
 let npcs = [];
 let explosions = []; // Visual-only, sent to client
-let nextTeam = 'red'; // Alternate teams
 
 // Initialize 16 Capture Zones (4x4 Grid)
 let zones = [];
@@ -90,11 +89,32 @@ function genFood() {
 }
 
 function spawnPlayer(id, name, currentTeam) {
-    let team = currentTeam || nextTeam;
-    // Alternate teams for new players
-    if (!currentTeam) {
-        if (nextTeam === 'red') nextTeam = 'blue';
-        else nextTeam = 'red';
+    let team = currentTeam;
+
+    // If no team specified, use smart balancing
+    if (!team) {
+        const playerList = Object.values(players);
+        const redCount = playerList.filter(p => p.team === 'red').length;
+        const blueCount = playerList.filter(p => p.team === 'blue').length;
+
+        if (playerList.length === 0) {
+            team = 'red'; // First player always red
+        } else if (redCount < blueCount) {
+            team = 'red';
+        } else if (blueCount < redCount) {
+            team = 'blue';
+        } else {
+            // Equal count — assign to team that does NOT have the #1 player
+            let topPlayer = null;
+            let topScore = -1;
+            playerList.forEach(p => {
+                if (p.score > topScore) {
+                    topScore = p.score;
+                    topPlayer = p;
+                }
+            });
+            team = topPlayer && topPlayer.team === 'red' ? 'blue' : 'red';
+        }
     }
 
     let spawnX = team === 'red' ? Math.random() * 200 + 50 : MAP_SIZE - (Math.random() * 200 + 50);
@@ -190,6 +210,11 @@ io.on('connection', (socket) => {
     socket.on('join', (name) => {
         players[socket.id] = spawnPlayer(socket.id, name);
         socket.emit('init', { mapSize: MAP_SIZE, id: socket.id });
+    });
+
+    // Ping handler
+    socket.on('ping_check', () => {
+        socket.emit('pong_check');
     });
 
     socket.on('move', (data) => {

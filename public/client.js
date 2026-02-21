@@ -7,9 +7,12 @@ const loginScreen = document.getElementById('login-screen');
 const gameUI = document.getElementById('game-ui');
 const scoreEl = document.getElementById('score');
 const leaderboardList = document.getElementById('leaderboard-list');
+const pingDisplay = document.getElementById('ping-display');
 
 let myId = null;
 let mapSize = 1200;
+let currentPing = 0;
+let pingStart = 0;
 let players = {};
 let food = [];
 let bullets = [];
@@ -37,6 +40,18 @@ socket.on('init', (data) => {
     mapSize = data.mapSize;
     myId = data.id;
 });
+
+// Ping measurement
+socket.on('pong_check', () => {
+    currentPing = Date.now() - pingStart;
+    pingDisplay.innerText = `Ping: ${currentPing}ms`;
+    pingDisplay.style.color = currentPing < 80 ? '#2ecc71' : currentPing < 150 ? '#f1c40f' : '#e74c3c';
+});
+
+setInterval(() => {
+    pingStart = Date.now();
+    socket.emit('ping_check');
+}, 2000);
 
 socket.on('update', (data) => {
     // Update target positions for interpolation instead of snapping

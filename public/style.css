@@ -167,9 +167,23 @@ button:hover {
 
 #score {
     position: absolute;
-    bottom: 20px;
+    bottom: 50px;
     left: 20px;
     font-size: 1.5rem;
     font-weight: bold;
     text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.5);
+}
+
+#ping-display {
+    position: absolute;
+    bottom: 20px;
+    left: 20px;
+    font-size: 0.9rem;
+    font-weight: 600;
+    font-family: 'Courier New', monospace;
+    color: #2ecc71;
+    text-shadow: 1px 1px 3px rgba(0, 0, 0, 0.5);
+    background: rgba(25, 25, 35, 0.5);
+    padding: 4px 10px;
+    border-radius: 6px;
 }
